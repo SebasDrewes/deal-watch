@@ -4,10 +4,11 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - run: python tools/probe403.py
+      - run: pip install playwright && playwright install --with-deps chromium
+      - run: python tools/probe_browser.py
