@@ -1,7 +1,29 @@
 # deal-watch
 
 Emails me when something on a couple of Argentine retail sites drops to 70% off
-or more. Runs on GitHub Actions; no server.
+or more.
+
+## It cannot run on GitHub Actions
+
+Both sites reject GitHub's runners outright. Measured with `tools/probe.py` on
+2026-09-08, from a runner at 64.236.193.26 (Chicago, AS8075 Microsoft):
+
+| headers | electrooutlet | fravega |
+|---|---|---|
+| bare urllib UA | 403 (cloudflare) | 403 (CloudFront) |
+| minimal | 403 | 403 |
+| full Chrome set, sec-ch-ua and all | 403 | 403 |
+
+Twelve of twelve blocked. The same probe from a Buenos Aires residential
+connection (AS16814) returns 200 on all twelve, including the bare
+`python-urllib/3` User-Agent. So this is IP reputation or geo, not header
+fingerprinting, and no amount of header spoofing fixes it.
+
+`.github/workflows/watch.yml` is kept for reference but is **disabled**. Re-enable
+it only from a runner with an Argentine, non-datacenter address.
+
+The watcher therefore runs on a Mac in Argentina under launchd, on the two-tier
+schedule below.
 
 ## Sources
 
@@ -20,10 +42,13 @@ the same page.
 
 ## Two-tier schedule
 
-| Tier | Cron | Work | Catches |
+| Tier | Every | Work | Catches |
 |---|---|---|---|
-| quick | `*/5 * * * *` | 4 requests, ~8s | new listings, and every Fravega change |
-| full | `23 */3 * * *` | 33 requests, ~90s | price drops on older electrooutlet stock |
+| quick | 5 min | 4 requests, ~8s | new listings, and every Fravega change |
+| full | 3 hours | 33 requests, ~90s | price drops on older electrooutlet stock |
+
+Two launchd agents run these. A `flock` on `.watch.lock` keeps them from racing
+on state: if the full tier is mid-run, the quick tick logs and exits.
 
 Quick mode scans only electrooutlet's newest page, which is sound because the
 listing is ordered `CustomDate` descending, so anything newly published is on
@@ -33,8 +58,6 @@ in the newest 50 outlet items, so the Outlet/Primera tag stays correct.
 Fravega needs no full tier at all: sorting by discount means 2 pages already are
 the complete set of items above the threshold.
 
-GitHub delays scheduled workflows under load, "including the start of every
-hour", so `*/5` realistically lands every 5-15 minutes.
 
 ## Alert conditions
 

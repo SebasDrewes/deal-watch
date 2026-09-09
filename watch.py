@@ -2,6 +2,7 @@
 """Watch electrooutlet.com.ar and fravega.com and alert on listings at or above a discount threshold."""
 
 import argparse
+import fcntl
 import gzip
 import html
 import json
@@ -23,6 +24,7 @@ STATE_PATH = Path(os.environ.get("DEAL_WATCH_STATE") or HOME / "state.json")
 STATE_FIELDS = ("source", "name", "pct", "alerted_pct", "first_seen", "last_seen")
 CONFIG_PATH = HOME / "config.json"
 LOG_PATH = HOME / "watch.log"
+LOCK_PATH = HOME / ".watch.lock"
 
 ORIGIN = "https://electrooutlet.com.ar"
 FRAVEGA = "https://www.fravega.com"
@@ -543,6 +545,16 @@ def migrate_state(state):
     log(f"migrated {len(state['items'])} state entries to source-prefixed keys")
 
 
+def acquire_lock():
+    handle = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true", help="scan and print, send nothing, save nothing")
@@ -558,6 +570,11 @@ def main():
     cfg = load_config()
     if args.threshold:
         cfg["threshold_pct"] = args.threshold
+
+    lock = acquire_lock()
+    if lock is None:
+        log("another run holds the lock, skipping this tick")
+        return 0
 
     if args.test_email:
         send_email(cfg, "deal-watch test",
