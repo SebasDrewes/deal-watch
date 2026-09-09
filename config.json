@@ -1,0 +1,11 @@
+{
+  "threshold_pct": 70,
+  "smtp_host": "smtp.gmail.com",
+  "smtp_port": 587,
+  "keychain_service": "electrooutlet-watch-smtp",
+  "min_expected_items": 300,
+  "request_delay_sec": 0.4,
+  "fravega_collection": "electrofans",
+  "fravega_max_pages": 15,
+  "sources": {"electrooutlet": true, "fravega": true}
+}

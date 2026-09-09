@@ -1,0 +1,69 @@
+name: deal-watch
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+    - cron: '23 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Scan mode'
+        type: choice
+        default: full
+        options: [full, quick, dry-run]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deal-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Resolve mode
+        id: mode
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_MODE: ${{ inputs.mode }}
+        run: |
+          if [ -n "$INPUT_MODE" ]; then
+            case "$INPUT_MODE" in
+              quick)   echo 'flags=--quick'   >> "$GITHUB_OUTPUT" ;;
+              dry-run) echo 'flags=--dry-run' >> "$GITHUB_OUTPUT" ;;
+              *)       echo 'flags='          >> "$GITHUB_OUTPUT" ;;
+            esac
+          elif [ "$SCHEDULE" = '*/5 * * * *' ]; then
+            echo 'flags=--quick' >> "$GITHUB_OUTPUT"
+          else
+            echo 'flags=' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Scan
+        env:
+          ELECTROOUTLET_SMTP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+          DEAL_WATCH_SMTP_USER: ${{ secrets.SMTP_USER }}
+          DEAL_WATCH_EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          DEAL_WATCH_STATE: state.json.gz
+        run: python watch.py ${{ steps.mode.outputs.flags }}
+
+      - name: Commit state
+        run: |
+          if git diff --quiet -- state.json.gz; then
+            echo "state unchanged, nothing to commit"
+            exit 0
+          fi
+          git config user.name 'deal-watch'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add state.json.gz
+          git commit -m "state: $(date -u '+%Y-%m-%d %H:%MZ')"
+          git push
