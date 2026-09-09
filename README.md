@@ -19,6 +19,19 @@ connection (AS16814) returns 200 on all twelve, including the bare
 `python-urllib/3` User-Agent. So this is IP reputation or geo, not header
 fingerprinting, and no amount of header spoofing fixes it.
 
+A follow-up test (`tools/probe_browser.py`) ruled out the remaining hope, that
+electrooutlet's Cloudflare response is a *solvable* challenge rather than a ban:
+
+- plain urllib, `/robots.txt`: 403 `cf-mitigated: challenge` (even robots.txt)
+- plain urllib, listing: 403 `cf-mitigated: challenge`
+- headless Chromium via Playwright: challenge page loads and runs its JS
+  (6.8 KB grows to 29 KB) but never clears over 30 seconds
+
+So a real browser engine on a GitHub runner does not get through either. The
+block is blanket and path-agnostic. Note that electrooutlet's robots.txt permits
+all crawling, so this is generic IP-reputation bot protection rather than a
+site policy against automated access.
+
 `.github/workflows/watch.yml` is kept for reference but is **disabled**. Re-enable
 it only from a runner with an Argentine, non-datacenter address.
 
