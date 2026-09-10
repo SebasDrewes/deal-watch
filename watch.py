@@ -28,7 +28,8 @@ LOCK_PATH = HOME / ".watch.lock"
 
 ORIGIN = "https://electrooutlet.com.ar"
 FRAVEGA = "https://www.fravega.com"
-FRAVEGA_LISTING = FRAVEGA + "/l/?promociones={collection}&sorting=HIGHEST_DISCOUNT&page={page}"
+FRAVEGA_LISTING = FRAVEGA + "/l/?promociones={collection}&descuento=desde-{bucket}-off&page={page}"
+FRAVEGA_BUCKETS = (10, 20, 30, 40, 50, 60, 70, 80, 90)
 NEXT_DATA = re.compile(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S)
 LISTING = (
     ORIGIN + "/Item/Result?id=0&order=CustomDate&sort=False&itemtype=Product"
@@ -191,81 +192,115 @@ def crawl(filters, cfg, ids_only=False, max_pages=None):
     return seen, complete
 
 
+def _fravega_page(collection, bucket, page):
+    raw = fetch(FRAVEGA_LISTING.format(collection=collection, bucket=bucket, page=page))
+    match = NEXT_DATA.search(raw)
+    if not match:
+        raise RuntimeError("fravega: no __NEXT_DATA__ in the page, layout changed")
+    state = json.loads(match.group(1))["props"]["pageProps"].get("__APOLLO_STATE__")
+    if not isinstance(state, dict) or "ROOT_QUERY" not in state:
+        raise RuntimeError("fravega: __APOLLO_STATE__ has no ROOT_QUERY, page shape "
+                           "changed or the site is mid-deploy")
+    root = state["ROOT_QUERY"]
+    items_key = next((k for k in root if k.startswith("items(")), None)
+    if items_key is None:
+        raise RuntimeError("fravega: no items() in the Apollo state, query shape changed")
+    node = root[items_key]
+    results_key = next((k for k in node if k.startswith("results(")), None)
+    return node.get("total"), (node[results_key] if results_key else []), raw
+
+
+def _fravega_parse(batch, raw, collection, threshold):
+    hrefs = {}
+    for href in set(re.findall(r'href="(/p/[^"]+)"', raw)):
+        code = re.search(r"-(\d+)/$", href)
+        if code:
+            hrefs[code.group(1)] = href
+
+    out = []
+    for entry in batch:
+        skus = entry.get("skus", {}).get("results") or []
+        if not skus:
+            continue
+        sku = skus[0]
+        pricing_key = next(
+            (k for k in sku if k.startswith("pricing(") and "fravega-ecommerce" in k), None)
+        prices = (sku.get(pricing_key) or []) if pricing_key else []
+        if not prices:
+            continue
+        info = prices[0]
+        list_price, sale_price = info.get("listPrice"), info.get("salePrice")
+        pct = info.get("discount")
+        if pct is None and list_price and sale_price:
+            pct = round((1 - sale_price / list_price) * 100)
+        if pct is None or pct < threshold:
+            continue
+
+        code = sku.get("code")
+        href = hrefs.get(code)
+        category = None
+        cat_key = next((k for k in sku if k.startswith("categorization(")), None)
+        if cat_key and sku.get(cat_key):
+            chain = sku[cat_key][0]
+            if chain:
+                category = chain[0].get("name")
+
+        out.append({
+            "source": "fravega",
+            "id": entry.get("id"),
+            "name": entry.get("title"),
+            "sku": code,
+            "brand": (entry.get("brand") or {}).get("name"),
+            "category": category,
+            "url": FRAVEGA + href if href else FRAVEGA + f"/l/?promociones={collection}",
+            "price": float(sale_price) if sale_price else None,
+            "list_price": float(list_price) if list_price else None,
+            "discount_pct": pct,
+            "tag": collection,
+            "in_stock": True,
+        })
+    return out
+
+
 def crawl_fravega(cfg):
     collection = cfg["fravega_collection"]
     threshold = cfg["threshold_pct"]
-    found, pages = [], 0
+    usable = [b for b in FRAVEGA_BUCKETS if b <= threshold]
+    if not usable:
+        raise RuntimeError(
+            f"fravega: threshold {threshold}% is below its smallest discount filter "
+            f"({FRAVEGA_BUCKETS[0]}%); a higher filter would silently miss items. "
+            "Raise threshold_pct or set sources.fravega false")
+    bucket = max(usable)
 
-    for page in range(1, cfg["fravega_max_pages"] + 1):
-        raw = fetch(FRAVEGA_LISTING.format(collection=collection, page=page))
-        match = NEXT_DATA.search(raw)
-        if not match:
-            raise RuntimeError("fravega: no __NEXT_DATA__ in the page, layout changed")
-        root = json.loads(match.group(1))["props"]["pageProps"]["__APOLLO_STATE__"]["ROOT_QUERY"]
-        items_key = next((k for k in root if k.startswith("items(")), None)
-        if items_key is None:
-            raise RuntimeError("fravega: no items() in the Apollo state, query shape changed")
-        results_key = next((k for k in root[items_key] if k.startswith("results(")), None)
-        batch = root[items_key][results_key] if results_key else []
-        pages += 1
-        if not batch:
-            break
+    total, batch, raw = _fravega_page(collection, bucket, 1)
+    if not batch:
+        return [], 1, bucket
 
-        hrefs = {}
-        for href in set(re.findall(r'href="(/p/[^"]+)"', raw)):
-            code = re.search(r"-(\d+)/$", href)
-            if code:
-                hrefs[code.group(1)] = href
+    found = _fravega_parse(batch, raw, collection, threshold)
+    seen = {e.get("id") for e in batch}
+    page_size = len(batch)
+    pages = 1
 
-        lowest = 100
-        for entry in batch:
-            skus = entry.get("skus", {}).get("results") or []
-            if not skus:
-                continue
-            sku = skus[0]
-            pricing_key = next(
-                (k for k in sku if k.startswith("pricing(") and "fravega-ecommerce" in k), None)
-            prices = sku.get(pricing_key) or [] if pricing_key else []
-            if not prices:
-                continue
-            price_info = prices[0]
-            list_price = price_info.get("listPrice")
-            sale_price = price_info.get("salePrice")
-            pct = price_info.get("discount")
-            if pct is None and list_price and sale_price:
-                pct = round((1 - sale_price / list_price) * 100)
-            if pct is None:
-                continue
-            lowest = min(lowest, pct)
-            if pct < threshold:
-                continue
-            code = sku.get("code")
-            href = hrefs.get(code)
-            category = None
-            cat_key = next((k for k in sku if k.startswith("categorization(")), None)
-            if cat_key and sku.get(cat_key):
-                chain = sku[cat_key][0]
-                if chain:
-                    category = chain[0].get("name")
-            found.append({
-                "source": "fravega",
-                "id": entry.get("id"),
-                "name": entry.get("title"),
-                "sku": code,
-                "brand": (entry.get("brand") or {}).get("name"),
-                "category": category,
-                "url": FRAVEGA + href if href else FRAVEGA + f"/l/?keyword={quote(entry.get('title') or '')}",
-                "price": float(sale_price) if sale_price else None,
-                "list_price": float(list_price) if list_price else None,
-                "discount_pct": pct,
-                "tag": collection,
-                "in_stock": True,
-            })
-        if lowest < threshold:
-            break
+    expected = 1
+    if isinstance(total, int) and total > 0 and page_size:
+        expected = min(-(-total // page_size), cfg["fravega_max_pages"])
+
+    for page in range(2, expected + 1):
         time.sleep(cfg["request_delay_sec"])
+        page_total, batch, raw = _fravega_page(collection, bucket, page)
+        pages += 1
+        if page_total != total:
+            log(f"fravega: page {page} reported total {page_total} not {total}, "
+                "filter was dropped; stopping")
+            break
+        fresh = [e for e in batch if e.get("id") not in seen]
+        if not fresh:
+            break
+        seen.update(e.get("id") for e in fresh)
+        found += _fravega_parse(fresh, raw, collection, threshold)
 
-    return found, pages
+    return found, pages, bucket
 
 
 def crawl_electrooutlet(cfg, quick=False):
@@ -424,10 +459,11 @@ def collect(cfg, args):
             log(f"electrooutlet FAILED: {exc}")
     if cfg["sources"].get("fravega", True):
         try:
-            items, pages = crawl_fravega(cfg)
+            items, pages, bucket = crawl_fravega(cfg)
             gathered += items
             log(f"fravega: {len(items)} items at >={cfg['threshold_pct']}% "
-                f"({pages} page(s) of '{cfg['fravega_collection']}')")
+                f"({pages} page(s) of '{cfg['fravega_collection']}', "
+                f"filter desde-{bucket}-off)")
         except Exception as exc:
             failures.append(f"fravega: {exc}")
             log(f"fravega FAILED: {exc}")

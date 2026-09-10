@@ -59,24 +59,20 @@ Corollaries already worked through:
    reboot survival. Android version determines the phantom-process fix: a
    Developer Options toggle ("Disable child process restrictions") on 14+, an ADB
    command on 12/13. See README and memory for the command.
-2. **Decide fravega's fate.** Its robots.txt disallows `/*sorting=`, the exact
-   parameter our efficient 2-page scan uses, and we currently send ~590 requests
-   a day at it. Its `listPrice` anchors are also inflated, so its "70% off" is
-   much weaker evidence than electrooutlet's. Options: switch to the allowed
-   unsorted listing swept once daily, or drop the source. Electrooutlet's
-   robots.txt permits everything and is where every real deal came from.
-   Beware: Python's `urllib.robotparser` does NOT implement wildcards and wrongly
-   reports that URL as allowed.
+2. ~~**Decide fravega's fate.**~~ DONE 2026-09-10. Fravega stays, by decision.
+   Switched from the robots-disallowed `sorting=HIGHEST_DISCOUNT` to the
+   permitted `descuento=desde-70-off` discount facet: same 18 items, same 2
+   requests, allowed path. Its `listPrice` anchors are still inflated, so treat
+   a fravega 70% as a weaker signal than an electrooutlet 70%.
 3. **Drop the quick cadence to 15 minutes.** Currently ~1,400 requests/day total,
    which is a lot to aim at a small retailer for a threshold that trips twice a
    day. Also aligns with the tablet's JobScheduler floor.
 4. **Write state only when it changes.** Currently rewrites 178 KB every 5
    minutes regardless. Saves flash wear on a tablet or SD card.
-5. **Clean up a leaked error.** `crawl_fravega` indexes
-   `["__APOLLO_STATE__"]["ROOT_QUERY"]` directly, so a transient shape change
-   surfaces as a bare `KeyError: 'ROOT_QUERY'` instead of a useful message.
-   Seen for real 2026-09-10 03:26 to 03:40 during what looked like a fravega
-   deploy; it self-recovered and electrooutlet was unaffected.
+5. ~~**Clean up a leaked error.**~~ DONE 2026-09-10, as part of the fravega
+   rewrite. The `KeyError: 'ROOT_QUERY'` seen 03:26 to 03:40 that morning (a
+   fravega deploy; self-recovered, electrooutlet unaffected) now raises a clear
+   message instead.
 
 ## Commands
 

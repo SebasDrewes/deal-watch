@@ -47,11 +47,21 @@ Discount comes from each card's `badge-dto percent`, with a `tachado` vs
 `precio-final` fallback. Items with no `tachado` have no offer and are skipped.
 
 **fravega.com** — the `electrofans` collection (~1400 items). Never crawled in
-full: the listing is sorted with `sorting=HIGHEST_DISCOUNT` and pages are walked
-only until the discount falls below the threshold, normally 2 pages. Prices come
-from the `__NEXT_DATA__` Apollo state, channel `fravega-ecommerce`. Product URLs
-are recovered by matching each sku `code` against `/p/<slug>-<code>/` hrefs on
-the same page.
+full: the listing carries a server-side discount facet, `descuento=desde-N-off`,
+so the query returns only items already at or above the threshold. Two requests
+covers all 18 current hits. Prices come from the `__NEXT_DATA__` Apollo state,
+channel `fravega-ecommerce`. Product URLs are recovered by matching each sku
+`code` against `/p/<slug>-<code>/` hrefs on the same page.
+
+The filter buckets are fixed at 10..90 in steps of 10, so the code picks the
+largest bucket at or below `threshold_pct` and filters the remainder client-side.
+It refuses to run rather than pick a bucket above the threshold, which would
+silently miss items.
+
+Pagination uses the `total` the first page reports, because requesting a page
+beyond the filtered result set makes fravega **silently drop the filter** and
+return the unfiltered catalogue (`total` jumps to 10000). A page whose `total`
+disagrees with the first page's is treated as filter loss and stops the walk.
 
 ## Two-tier schedule
 
@@ -149,8 +159,14 @@ electrooutlet:
 
 fravega:
 
-- `sorting=HIGHEST_DISCOUNT` is the working URL param. `ordenar=`, `orderBy=`
-  and `sort=` are silently ignored and fall back to sales ranking.
+- `descuento=desde-N-off` is the discount facet and is permitted by robots.txt.
+  `sorting=HIGHEST_DISCOUNT` also works and returns the same items, but
+  robots.txt disallows `/*sorting=`, so the facet is the right door.
+- Careful: Python's `urllib.robotparser` does NOT implement `*` wildcards. It
+  reports `/*sorting=` URLs as allowed, which is wrong. Match with a real
+  wildcard-aware check.
+- Requesting a page past the end of a filtered result set drops the filter
+  instead of returning empty. Always paginate against the reported `total`.
 - The items query embeds a Buenos Aires postal code. Results from a US-based
   runner may differ from results in Argentina; worth checking if the hit list
   ever looks wrong.
