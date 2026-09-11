@@ -21,7 +21,7 @@ from urllib.parse import quote
 
 HOME = Path(__file__).resolve().parent
 STATE_PATH = Path(os.environ.get("DEAL_WATCH_STATE") or HOME / "state.json")
-STATE_FIELDS = ("source", "name", "pct", "alerted_pct", "first_seen", "last_seen")
+STATE_FIELDS = ("source", "name", "pct", "alerted_pct", "first_seen", "last_seen", "missing")
 CONFIG_PATH = HOME / "config.json"
 LOG_PATH = HOME / "watch.log"
 LOCK_PATH = HOME / ".watch.lock"
@@ -59,6 +59,7 @@ DEFAULTS = {
     "fravega_collection": "electrofans",
     "fravega_max_pages": 15,
     "sources": {"electrooutlet": True, "fravega": True},
+    "rearm_after_misses": 3,
 }
 
 CARD_RE = re.compile(r'<article class="PRODUCT_BOX product-id-(\d+)(.*?)</article>', re.S)
@@ -192,7 +193,17 @@ def crawl(filters, cfg, ids_only=False, max_pages=None):
     return seen, complete
 
 
-def _fravega_page(collection, bucket, page):
+def _fravega_page(collection, bucket, page, attempts=3):
+    for attempt in range(attempts):
+        total, batch, raw = _fravega_page_once(collection, bucket, page)
+        if batch or not total:
+            return total, batch, raw
+        if attempt < attempts - 1:
+            time.sleep(1.5 * (attempt + 1))
+    return total, batch, raw
+
+
+def _fravega_page_once(collection, bucket, page):
     raw = fetch(FRAVEGA_LISTING.format(collection=collection, bucket=bucket, page=page))
     match = NEXT_DATA.search(raw)
     if not match:
@@ -274,8 +285,12 @@ def crawl_fravega(cfg):
     bucket = max(usable)
 
     total, batch, raw = _fravega_page(collection, bucket, 1)
-    if not batch:
+    if not total:
         return [], 1, bucket
+    if not batch:
+        raise RuntimeError(
+            f"fravega: reported total {total} but returned an empty result set on page 1 "
+            "after retries; treating as a failed scan rather than zero items")
 
     found = _fravega_parse(batch, raw, collection, threshold)
     seen = {e.get("id") for e in batch}
@@ -299,6 +314,12 @@ def crawl_fravega(cfg):
             break
         seen.update(e.get("id") for e in fresh)
         found += _fravega_parse(fresh, raw, collection, threshold)
+
+    if isinstance(total, int) and 0 < total <= page_size * cfg["fravega_max_pages"]:
+        if len(seen) < total:
+            raise RuntimeError(
+                f"fravega: incomplete scan, collected {len(seen)} of {total} items "
+                "after retries; treating as a failed scan so nothing is re-armed")
 
     return found, pages, bucket
 
@@ -446,12 +467,13 @@ SOURCE_LABEL = {"electrooutlet": "ElectroOutlet", "fravega": "Fravega"}
 
 
 def collect(cfg, args):
-    gathered, failures = [], []
+    gathered, failures, scanned = [], [], set()
     quick = getattr(args, "quick", False)
     if cfg["sources"].get("electrooutlet", True):
         try:
             items = crawl_electrooutlet(cfg, quick=quick)
             gathered += items
+            scanned.add("electrooutlet")
             log(f"electrooutlet: {len(items)} items scanned"
                 + (" (quick: newest page only)" if quick else ""))
         except Exception as exc:
@@ -461,13 +483,14 @@ def collect(cfg, args):
         try:
             items, pages, bucket = crawl_fravega(cfg)
             gathered += items
+            scanned.add("fravega")
             log(f"fravega: {len(items)} items at >={cfg['threshold_pct']}% "
                 f"({pages} page(s) of '{cfg['fravega_collection']}', "
                 f"filter desde-{bucket}-off)")
         except Exception as exc:
             failures.append(f"fravega: {exc}")
             log(f"fravega FAILED: {exc}")
-    return gathered, failures
+    return gathered, failures, scanned
 
 
 def run(cfg, args):
@@ -476,11 +499,9 @@ def run(cfg, args):
     now = datetime.now(timezone.utc)
     threshold = cfg["threshold_pct"]
 
-    items, failures = collect(cfg, args)
-    if failures and not items:
+    items, failures, scanned_sources = collect(cfg, args)
+    if failures and not scanned_sources:
         raise RuntimeError("; ".join(failures))
-
-    scanned_sources = {i["source"] for i in items}
     first_run = not state["items"]
     hits = []
 
@@ -520,9 +541,18 @@ def run(cfg, args):
         state["items"][key] = record
 
     seen_keys = {f"{i['source']}:{i['id']}" for i in items}
+    needed = cfg["rearm_after_misses"]
     for key, record in state["items"].items():
         source = record.get("source")
-        if source in scanned_sources and source != "electrooutlet" and key not in seen_keys:
+        if source not in scanned_sources or source == "electrooutlet":
+            continue
+        if key in seen_keys:
+            record["missing"] = 0
+            continue
+        misses = (record.get("missing") or 0) + 1
+        record["missing"] = misses
+        if misses >= needed and record.get("alerted_pct") is not None:
+            log(f"re-arming {key} after {misses} consecutive absences")
             record["alerted_pct"] = None
 
     cutoff = (now - timedelta(days=cfg["prune_after_days"])).date().isoformat()
@@ -623,7 +653,7 @@ def main():
         if args.bootstrap:
             state = load_state()
             migrate_state(state)
-            items, failures = collect(cfg, args)
+            items, failures, _ = collect(cfg, args)
             if failures:
                 raise RuntimeError("; ".join(failures))
             now = datetime.now(timezone.utc).date().isoformat()
