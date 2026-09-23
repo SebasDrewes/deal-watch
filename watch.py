@@ -217,8 +217,19 @@ def _fravega_page_once(collection, bucket, page):
     if items_key is None:
         raise RuntimeError("fravega: no items() in the Apollo state, query shape changed")
     node = root[items_key]
-    results_key = next((k for k in node if k.startswith("results(")), None)
+    results_key = next(
+        (k for k in node if k == "results" or k.startswith("results(")), None)
     return node.get("total"), (node[results_key] if results_key else []), raw
+
+
+def _fravega_pricing(entry):
+    pricing = entry.get("pricing")
+    if isinstance(pricing, dict):
+        return pricing if pricing.get("channel") in (None, "fravega-ecommerce") else None
+    key = next(
+        (k for k in entry if k.startswith("pricing(") and "fravega-ecommerce" in k), None)
+    prices = (entry.get(key) or []) if key else []
+    return prices[0] if prices else None
 
 
 def _fravega_parse(batch, raw, collection, threshold):
@@ -230,16 +241,13 @@ def _fravega_parse(batch, raw, collection, threshold):
 
     out = []
     for entry in batch:
-        skus = entry.get("skus", {}).get("results") or []
-        if not skus:
+        item = entry.get("item")
+        if not isinstance(item, dict):
+            raise RuntimeError(
+                "fravega: a result row carries no item, the query shape changed")
+        info = _fravega_pricing(entry)
+        if not info:
             continue
-        sku = skus[0]
-        pricing_key = next(
-            (k for k in sku if k.startswith("pricing(") and "fravega-ecommerce" in k), None)
-        prices = (sku.get(pricing_key) or []) if pricing_key else []
-        if not prices:
-            continue
-        info = prices[0]
         list_price, sale_price = info.get("listPrice"), info.get("salePrice")
         pct = info.get("discount")
         if pct is None and list_price and sale_price:
@@ -247,21 +255,20 @@ def _fravega_parse(batch, raw, collection, threshold):
         if pct is None or pct < threshold:
             continue
 
-        code = sku.get("code")
-        href = hrefs.get(code)
+        code = entry.get("code")
+        slug = item.get("slug")
+        href = hrefs.get(code) or (f"/p/{slug}-{code}/" if slug and code else None)
         category = None
-        cat_key = next((k for k in sku if k.startswith("categorization(")), None)
-        if cat_key and sku.get(cat_key):
-            chain = sku[cat_key][0]
-            if chain:
-                category = chain[0].get("name")
+        chain = next(iter(entry.get("categorization") or []), None)
+        if chain:
+            category = chain[0].get("name")
 
         out.append({
             "source": "fravega",
-            "id": entry.get("id"),
-            "name": entry.get("title"),
+            "id": item.get("id"),
+            "name": item.get("title"),
             "sku": code,
-            "brand": (entry.get("brand") or {}).get("name"),
+            "brand": (item.get("brand") or {}).get("name"),
             "category": category,
             "url": FRAVEGA + href if href else FRAVEGA + f"/l/?promociones={collection}",
             "price": float(sale_price) if sale_price else None,
@@ -271,6 +278,13 @@ def _fravega_parse(batch, raw, collection, threshold):
             "in_stock": True,
         })
     return out
+
+
+def _fravega_keep(found, entries):
+    for entry in entries:
+        prev = found.get(entry["id"])
+        if prev is None or entry["discount_pct"] > prev["discount_pct"]:
+            found[entry["id"]] = entry
 
 
 def crawl_fravega(cfg):
@@ -292,8 +306,9 @@ def crawl_fravega(cfg):
             f"fravega: reported total {total} but returned an empty result set on page 1 "
             "after retries; treating as a failed scan rather than zero items")
 
-    found = _fravega_parse(batch, raw, collection, threshold)
-    seen = {e.get("id") for e in batch}
+    found = {}
+    _fravega_keep(found, _fravega_parse(batch, raw, collection, threshold))
+    seen = {e.get("code") for e in batch}
     page_size = len(batch)
     pages = 1
 
@@ -309,11 +324,11 @@ def crawl_fravega(cfg):
             log(f"fravega: page {page} reported total {page_total} not {total}, "
                 "filter was dropped; stopping")
             break
-        fresh = [e for e in batch if e.get("id") not in seen]
+        fresh = [e for e in batch if e.get("code") not in seen]
         if not fresh:
             break
-        seen.update(e.get("id") for e in fresh)
-        found += _fravega_parse(fresh, raw, collection, threshold)
+        seen.update(e.get("code") for e in fresh)
+        _fravega_keep(found, _fravega_parse(fresh, raw, collection, threshold))
 
     if isinstance(total, int) and 0 < total <= page_size * cfg["fravega_max_pages"]:
         if len(seen) < total:
@@ -321,7 +336,7 @@ def crawl_fravega(cfg):
                 f"fravega: incomplete scan, collected {len(seen)} of {total} items "
                 "after retries; treating as a failed scan so nothing is re-armed")
 
-    return found, pages, bucket
+    return list(found.values()), pages, bucket
 
 
 def crawl_electrooutlet(cfg, quick=False):
