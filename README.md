@@ -48,10 +48,13 @@ Discount comes from each card's `badge-dto percent`, with a `tachado` vs
 
 **fravega.com** — the `electrofans` collection (~1400 items). Never crawled in
 full: the listing carries a server-side discount facet, `descuento=desde-N-off`,
-so the query returns only items already at or above the threshold. Two requests
-covers all 18 current hits. Prices come from the `__NEXT_DATA__` Apollo state,
-channel `fravega-ecommerce`. Product URLs are recovered by matching each sku
-`code` against `/p/<slug>-<code>/` hrefs on the same page.
+so the query returns only items already at or above the threshold. One or two
+requests cover every current hit. Prices come from the `__NEXT_DATA__` Apollo
+state, channel `fravega-ecommerce`. Each result row is one sku, so rows are
+deduplicated by sku `code` while pages are walked, then collapsed to one hit
+per `item.id` at the highest discount. Product URLs are built from
+`item.slug` plus the sku `code`, falling back to the `/p/<slug>-<code>/`
+hrefs on the same page.
 
 The filter buckets are fixed at 10..90 in steps of 10, so the code picks the
 largest bucket at or below `threshold_pct` and filters the remainder client-side.
