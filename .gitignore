@@ -3,3 +3,6 @@ __pycache__/
 watch.log
 launchd.*.log
 *.tmp
+job.out.log
+state.json
+.watch.lock

@@ -1,6 +1,6 @@
 # Where we left off
 
-Last updated 2026-09-10. Read this first when picking the project back up.
+Last updated 2026-09-24. Read this first when picking the project back up.
 
 ## Current status: working, on the Mac
 
@@ -51,9 +51,19 @@ Corollaries already worked through:
   instead of fighting it. Costs a **15-minute floor** (Android JobScheduler's
   minimum periodic interval) instead of 5 minutes. Acceptable.
 
+## Tablet port (2026-09-24)
+
+Code side done: `notify()` uses `termux-notification` when present (tap opens the
+listing), the SMTP password comes from `~/.config/deal-watch.env` when there is no
+Keychain, and state is rewritten only when items change or every
+`state_heartbeat_hours` (6). On the tablet, run `tools/termux/setup.sh` once; it
+test-emails, bootstraps a baseline, registers JobScheduler jobs (quick every
+15 min, full every 3 h) and a Termux:Boot hook that re-registers them. Unload the
+Mac launchd agents once the tablet has logged a few good ticks, or both will alert.
+
 ## Pending work
 
-1. **Port to the tablet.** Termux from F-Droid or GitHub, never the Play Store
+1. **Port to the tablet.** (code ready, see above; install pending) Termux from F-Droid or GitHub, never the Play Store
    (separate codebases). `pkg install python`. Needs: `termux-job-scheduler`
    registration, `termux-notification` support in `notify_macos`, Termux:Boot for
    reboot survival. Android version determines the phantom-process fix: a
@@ -64,10 +74,10 @@ Corollaries already worked through:
    permitted `descuento=desde-70-off` discount facet: same 18 items, same 2
    requests, allowed path. Its `listPrice` anchors are still inflated, so treat
    a fravega 70% as a weaker signal than an electrooutlet 70%.
-3. **Drop the quick cadence to 15 minutes.** Currently ~1,400 requests/day total,
+3. ~~**Drop the quick cadence to 15 minutes.**~~ DONE on the tablet jobs. Currently ~1,400 requests/day total,
    which is a lot to aim at a small retailer for a threshold that trips twice a
    day. Also aligns with the tablet's JobScheduler floor.
-4. **Write state only when it changes.** Currently rewrites 178 KB every 5
+4. ~~**Write state only when it changes.**~~ DONE 2026-09-24. Currently rewrites 178 KB every 5
    minutes regardless. Saves flash wear on a tablet or SD card.
 5. ~~**Clean up a leaked error.**~~ DONE 2026-09-10, as part of the fravega
    rewrite. The `KeyError: 'ROOT_QUERY'` seen 03:26 to 03:40 that morning (a

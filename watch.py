@@ -8,6 +8,7 @@ import html
 import json
 import os
 import re
+import shutil
 import smtplib
 import subprocess
 import sys
@@ -60,6 +61,7 @@ DEFAULTS = {
     "fravega_max_pages": 15,
     "sources": {"electrooutlet": True, "fravega": True},
     "rearm_after_misses": 3,
+    "state_heartbeat_hours": 6,
 }
 
 CARD_RE = re.compile(r'<article class="PRODUCT_BOX product-id-(\d+)(.*?)</article>', re.S)
@@ -99,7 +101,20 @@ def load_state():
         return json.load(fh)
 
 
-def save_state(state):
+def _state_unchanged(slim, heartbeat_hours):
+    if not STATE_PATH.exists():
+        return False
+    try:
+        prev = load_state()
+    except (OSError, ValueError):
+        return False
+    if prev.get("items") != slim["items"] or not prev.get("last_success"):
+        return False
+    age = datetime.now(timezone.utc) - datetime.fromisoformat(prev["last_success"])
+    return age < timedelta(hours=heartbeat_hours)
+
+
+def save_state(state, heartbeat_hours=0):
     slim = {
         "items": {
             key: {f: rec.get(f) for f in STATE_FIELDS if rec.get(f) is not None}
@@ -107,6 +122,8 @@ def save_state(state):
         },
         "last_success": state.get("last_success"),
     }
+    if heartbeat_hours and _state_unchanged(slim, heartbeat_hours):
+        return False
     payload = json.dumps(slim, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     tmp = STATE_PATH.with_name(STATE_PATH.name + ".tmp")
     if STATE_PATH.suffix == ".gz":
@@ -116,6 +133,7 @@ def save_state(state):
     else:
         tmp.write_text(payload, encoding="utf-8")
     tmp.replace(STATE_PATH)
+    return True
 
 
 def fetch(url, attempts=4):
@@ -368,7 +386,18 @@ def crawl_electrooutlet(cfg, quick=False):
     return out
 
 
-def notify_macos(title, subtitle, message, url=None):
+def notify(title, subtitle, message, url=None):
+    termux = shutil.which("termux-notification")
+    if termux:
+        cmd = [termux, "--title", title, "--content", f"{subtitle}\n{message}",
+               "--priority", "high", "--sound", "--group", "deal-watch"]
+        if url:
+            cmd += ["--action", f"termux-open-url '{url}'"]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return
     if sys.platform != "darwin":
         return
     try:
@@ -396,6 +425,10 @@ def smtp_password(cfg):
     env = os.environ.get("ELECTROOUTLET_SMTP_PASSWORD")
     if env:
         return env
+    if not shutil.which("security"):
+        raise RuntimeError(
+            "no SMTP password: set ELECTROOUTLET_SMTP_PASSWORD (on Termux, in "
+            "~/.config/deal-watch.env)")
     res = subprocess.run(
         ["security", "find-generic-password", "-a", cfg["smtp_user"],
          "-s", cfg["keychain_service"], "-w"],
@@ -588,9 +621,9 @@ def run(cfg, args):
             log(f"emailed {cfg['email_to']}: {subject}")
         except Exception as exc:
             log(f"EMAIL FAILED, hits stay pending for the next run: {exc}")
-            notify_macos("Deal watch: email failed", str(exc)[:80],
+            notify("Deal watch: email failed", str(exc)[:80],
                          f"{len(hits)} hit(s) found, will retry next run")
-        notify_macos(
+        notify(
             f"{top['discount_pct']}% off - {money(top['price'])}",
             (top["name"] or "")[:70],
             f"{len(hits)} item(s) at {threshold}%+ off" if len(hits) > 1
@@ -607,7 +640,7 @@ def run(cfg, args):
             state["items"][key]["alerted_pct"] = hit["item"]["discount_pct"]
 
     if not args.dry_run:
-        save_state(state)
+        save_state(state, heartbeat_hours=0 if emailed else cfg["state_heartbeat_hours"])
 
     if failures:
         log("partial run, some sources failed: " + "; ".join(failures))
@@ -660,7 +693,7 @@ def main():
     if args.test_email:
         send_email(cfg, "deal-watch test",
                    "Plain text test.", "<p>HTML test. Setup works.</p>")
-        notify_macos("Deal watch", "Test", "Email and notification both work.")
+        notify("Deal watch", "Test", "Email and notification both work.")
         log(f"test email sent to {cfg['email_to']}")
         return 0
 
@@ -699,7 +732,7 @@ def main():
             age = datetime.now(timezone.utc) - datetime.fromisoformat(last)
             stale = age > timedelta(hours=cfg["stale_run_hours"])
         if stale:
-            notify_macos("Deal watch is broken",
+            notify("Deal watch is broken",
                          f"no successful run since {last or 'ever'}", str(exc)[:120])
         return 1
 
